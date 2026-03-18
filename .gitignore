@@ -1,0 +1,9 @@
+# Environments
+.env
+
+# Binaries
+pgcopilot
+pgcopilot.exe
+
+# OS generated files
+.DS_Store
