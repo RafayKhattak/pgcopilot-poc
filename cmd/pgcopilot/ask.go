@@ -13,14 +13,18 @@ import (
 	_ "github.com/RafayKhattak/pgcopilot/internal/provider/groq" // register "groq" factory
 	"github.com/RafayKhattak/pgcopilot/internal/sandbox"
 	"github.com/RafayKhattak/pgcopilot/internal/tool"
+	"github.com/RafayKhattak/pgcopilot/internal/tool/diagnostics"
 	"github.com/RafayKhattak/pgcopilot/internal/tool/metrics"
 )
 
-const systemPrompt = `You are pgcopilot, an expert PostgreSQL database AI assistant. ` +
-	`You analyze pgwatch metrics to diagnose database performance issues. ` +
-	`You have access to tools to fetch metric data. ` +
-	`ALWAYS use the tools provided before answering performance questions. ` +
-	`Be concise and highly technical.`
+const systemPrompt = `You are pgcopilot, an expert PostgreSQL database AI assistant. You analyze pgwatch metrics to diagnose database performance issues. You have access to tools to fetch metric data. ALWAYS use the tools provided before answering performance questions.
+
+You must format your final response strictly using the following Markdown structure:
+
+**1. Evidence:** [State the hard data and metric numbers you retrieved from the tools]
+**2. Likely Root Cause:** [State your diagnosis based on the evidence]
+**3. Confidence Score:** [Give a percentage 0-100% of how confident you are in this diagnosis]
+**4. Missing Context:** [State what data you cannot see that would increase your confidence, e.g., application logs, OS-level disk IO, etc.]`
 
 var askCmd = &cobra.Command{
 	Use:   "ask [prompt]",
@@ -42,12 +46,22 @@ PostgreSQL state.`,
 		if metricsURL == "" {
 			return fmt.Errorf("PGWATCH_METRICS_DB_URL is not set; please add it to .env or export it")
 		}
+		configURL := viper.GetString("PGWATCH_DB_URL")
+		if configURL == "" {
+			return fmt.Errorf("PGWATCH_DB_URL is not set; please add it to .env or export it")
+		}
 
-		client, err := db.NewClient(cmd.Context(), metricsURL)
+		metricsClient, err := db.NewClient(cmd.Context(), metricsURL)
 		if err != nil {
 			return fmt.Errorf("failed to connect to pgwatch metrics database: %w", err)
 		}
-		defer client.Close()
+		defer metricsClient.Close()
+
+		configClient, err := db.NewClient(cmd.Context(), configURL)
+		if err != nil {
+			return fmt.Errorf("failed to connect to pgwatch config database: %w", err)
+		}
+		defer configClient.Close()
 
 		llm, err := provider.New("groq", groqKey, "")
 		if err != nil {
@@ -55,9 +69,10 @@ PostgreSQL state.`,
 		}
 
 		sb := sandbox.New(sandbox.ModeReadOnly)
-		trendsTool := metrics.NewTrendsTool(client)
-		hypopgTool := metrics.NewHypoPGTool(client)
-		ag := agent.NewAgent(llm, sb, []tool.Tool{trendsTool, hypopgTool}, systemPrompt)
+		trendsTool := metrics.NewTrendsTool(metricsClient)
+		hypopgTool := metrics.NewHypoPGTool(metricsClient)
+		activeQTool := diagnostics.NewActiveQueriesTool(configClient)
+		ag := agent.NewAgent(llm, sb, []tool.Tool{trendsTool, hypopgTool, activeQTool}, systemPrompt)
 
 		fmt.Println("Thinking...")
 		answer, err := ag.Run(cmd.Context(), prompt)

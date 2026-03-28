@@ -116,3 +116,56 @@ func (c *Client) FetchMetricData(
 
 	return results, nil
 }
+
+// FetchMetricBaseline computes two server-side averages in a single table scan:
+//
+//   - currentAvg: the average of (data->>fieldName)::numeric over the last 1 hour.
+//   - baselineAvg: the average of (data->>fieldName)::numeric over the last 24 hours.
+//
+// The metric table name and the JSONB field name are both validated against
+// [safeIdentifier] before interpolation. Tenant isolation is enforced via
+// parameterised dbname ($1) and data->>'sys_id' ($2) predicates.
+//
+// PostgreSQL's FILTER clause lets us compute both windows from the same set
+// of rows returned by the 24-hour WHERE predicate, so only one index scan is
+// required. COALESCE guards against NULL when no rows match a window.
+func (c *Client) FetchMetricBaseline(
+	ctx context.Context,
+	metric string,
+	sysID string,
+	dbName string,
+	fieldName string,
+) (currentAvg float64, baselineAvg float64, err error) {
+
+	// ---- 1. Validate identifiers ----
+	if metric == "" {
+		return 0, 0, fmt.Errorf("db: metric name must not be empty")
+	}
+	if !safeIdentifier.MatchString(metric) {
+		return 0, 0, fmt.Errorf("db: invalid metric name %q: must match %s", metric, safeIdentifier.String())
+	}
+	if fieldName == "" {
+		return 0, 0, fmt.Errorf("db: field name must not be empty")
+	}
+	if !safeIdentifier.MatchString(fieldName) {
+		return 0, 0, fmt.Errorf("db: invalid field name %q: must match %s", fieldName, safeIdentifier.String())
+	}
+
+	// ---- 2. Build & execute the dual-window aggregate ----
+	query := fmt.Sprintf(`
+		SELECT
+			COALESCE(AVG((%[1]s)::numeric) FILTER (WHERE time >= NOW() - INTERVAL '1 hour'),  0),
+			COALESCE(AVG((%[1]s)::numeric),                                                    0)
+		FROM   public.%[2]s
+		WHERE  dbname          = $1
+		  AND  data->>'sys_id' = $2
+		  AND  time           >= NOW() - INTERVAL '24 hours'`,
+		"data->>'"+fieldName+"'", metric)
+
+	err = c.pool.QueryRow(ctx, query, dbName, sysID).Scan(&currentAvg, &baselineAvg)
+	if err != nil {
+		return 0, 0, fmt.Errorf("db: querying baseline for metric %q field %q: %w", metric, fieldName, err)
+	}
+
+	return currentAvg, baselineAvg, nil
+}

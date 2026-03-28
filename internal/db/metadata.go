@@ -2,7 +2,10 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // Queries target the pgwatch catalog schema which stores metric definitions
@@ -24,6 +27,24 @@ func (c *Client) GetAvailableMetrics(ctx context.Context) ([]string, error) {
 // (or instance) that pgwatch actively collects metrics from.
 func (c *Client) GetMonitoredDBs(ctx context.Context) ([]string, error) {
 	return c.queryStringColumn(ctx, queryMonitoredDBs)
+}
+
+// GetMonitoredDBConnStr resolves the connection string of an enabled monitored
+// database by looking it up in the pgwatch.source config table. The dbName
+// parameter is fully parameterised ($1) to prevent SQL injection.
+func (c *Client) GetMonitoredDBConnStr(ctx context.Context, dbName string) (string, error) {
+	const query = `SELECT connstr FROM pgwatch.source WHERE name = $1 AND is_enabled = true LIMIT 1`
+
+	var connStr string
+	err := c.pool.QueryRow(ctx, query, dbName).Scan(&connStr)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", fmt.Errorf("db: monitored database %q not found or disabled in pgwatch.source", dbName)
+	}
+	if err != nil {
+		return "", fmt.Errorf("db: resolving connection string for %q: %w", dbName, err)
+	}
+
+	return connStr, nil
 }
 
 // queryStringColumn executes a query that returns a single text column and
