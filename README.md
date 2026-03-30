@@ -356,6 +356,7 @@ wait
 
 </div>
 
+
 | Metric | Result |
 |--------|--------|
 | PostgreSQL version | 18.3 (Debian) |
