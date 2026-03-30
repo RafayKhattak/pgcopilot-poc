@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"os/signal"
 	"strings"
@@ -53,6 +54,18 @@ configured LLM for analysis and recommendations.`,
 		if err != nil {
 			return fmt.Errorf("invalid --dbname value: %w", err)
 		}
+		threshold, err := cmd.Flags().GetFloat64("critical-threshold")
+		if err != nil {
+			return fmt.Errorf("invalid --critical-threshold value: %w", err)
+		}
+		watchMetric, err := cmd.Flags().GetString("watch-metric")
+		if err != nil {
+			return fmt.Errorf("invalid --watch-metric value: %w", err)
+		}
+		watchField, err := cmd.Flags().GetString("watch-field")
+		if err != nil {
+			return fmt.Errorf("invalid --watch-field value: %w", err)
+		}
 
 		if sysID == "" {
 			return fmt.Errorf("--sys-id is required (run the discovery script to find it)")
@@ -97,12 +110,14 @@ configured LLM for analysis and recommendations.`,
 
 		sb := sandbox.New(sandbox.ModeReadOnly)
 		trendsTool := metrics.NewTrendsTool(metricsClient)
-		hypopgTool := metrics.NewHypoPGTool(metricsClient)
+		hypopgTool := metrics.NewHypoPGTool(configClient)
 		activeQTool := diagnostics.NewActiveQueriesTool(configClient)
+		locksTool := diagnostics.NewActiveLocksTool(configClient)
 
 		webhookURL := viper.GetString("PGCOPILOT_WEBHOOK_URL")
 
 		fmt.Printf("Proactive Watch Mode started for sys-id %s (db=%s) at interval %s\n", sysID, dbName, interval)
+		fmt.Printf("Watching: %s.%s | Critical threshold: %.1f%%\n", watchMetric, watchField, threshold)
 		if webhookURL != "" {
 			fmt.Printf("Webhook alerts enabled → %s\n", webhookURL)
 		}
@@ -111,10 +126,24 @@ configured LLM for analysis and recommendations.`,
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 
-		tools := []tool.Tool{trendsTool, hypopgTool, activeQTool}
+		tools := []tool.Tool{trendsTool, hypopgTool, activeQTool, locksTool}
+
+		cfg := analysisConfig{
+			llm:           llm,
+			sb:            sb,
+			tools:         tools,
+			metricsClient: metricsClient,
+			dbName:        dbName,
+			sysID:         sysID,
+			interval:      interval,
+			webhookURL:    webhookURL,
+			threshold:     threshold,
+			watchMetric:   watchMetric,
+			watchField:    watchField,
+		}
 
 		// Run the first analysis immediately, then on every tick.
-		runAnalysis(ctx, llm, sb, tools, dbName, sysID, interval, webhookURL)
+		runAnalysis(ctx, cfg)
 
 		for {
 			select {
@@ -122,34 +151,77 @@ configured LLM for analysis and recommendations.`,
 				fmt.Println("\nShutting down proactive watcher...")
 				return nil
 			case <-ticker.C:
-				runAnalysis(ctx, llm, sb, tools, dbName, sysID, interval, webhookURL)
+				runAnalysis(ctx, cfg)
 			}
 		}
 	},
 }
 
-// runAnalysis constructs a fresh Agent (clean conversation), sends the
-// proactive prompt, and prints the result. If a webhook URL is configured
-// and the response indicates an anomaly, an alert is dispatched.
-// Errors are logged but never propagate — the daemon must survive transient failures.
-func runAnalysis(
-	ctx context.Context,
-	llm provider.Provider,
-	sb *sandbox.Sandbox,
-	tools []tool.Tool,
-	dbName, sysID string,
-	interval time.Duration,
-	webhookURL string,
-) {
-	ts := time.Now().Format("2006-01-02 15:04:05")
-	log.Printf("[DAEMON] %s — Waking up to analyze db_stats...", ts)
+// analysisConfig bundles the long-lived state that every analysis cycle needs.
+type analysisConfig struct {
+	llm           provider.Provider
+	sb            *sandbox.Sandbox
+	tools         []tool.Tool
+	metricsClient *db.Client
+	dbName        string
+	sysID         string
+	interval      time.Duration
+	webhookURL    string
+	threshold     float64
+	watchMetric   string
+	watchField    string
+}
 
-	ag := agent.NewAgent(llm, sb, tools, watchSystemPrompt)
+// runAnalysis performs a pre-LLM threshold check on the configured metric
+// field's deviation. If the deviation is below the configured threshold the
+// cycle is skipped, saving LLM tokens. Otherwise a fresh Agent is created and
+// the full analysis + webhook pipeline runs.
+// Errors are logged but never propagate — the daemon must survive transient failures.
+func runAnalysis(ctx context.Context, cfg analysisConfig) {
+	ts := time.Now().Format("2006-01-02 15:04:05")
+	log.Printf("[DAEMON] %s — Waking up to analyze %s.%s...", ts, cfg.watchMetric, cfg.watchField)
+
+	// ---- Pre-LLM threshold gate ----
+	currentAvg, baselineAvg, err := cfg.metricsClient.FetchMetricBaseline(
+		ctx, cfg.watchMetric, cfg.sysID, cfg.dbName, cfg.watchField,
+	)
+	if err != nil {
+		log.Printf("[DAEMON] threshold check failed (proceeding to LLM): %v", err)
+	} else {
+		var deviation float64
+		switch {
+		case baselineAvg != 0:
+			deviation = math.Abs(((currentAvg - baselineAvg) / baselineAvg) * 100)
+		case currentAvg > 0:
+			// Baseline is zero but current is positive — a spike from nothing.
+			// Treat as infinite deviation so the LLM is always invoked.
+			deviation = math.MaxFloat64
+		}
+
+		if deviation == math.MaxFloat64 {
+			log.Printf("[DAEMON] %s.%s spike from zero baseline (current=%.2f). Forcing LLM analysis.",
+				cfg.watchMetric, cfg.watchField, currentAvg)
+		} else {
+			log.Printf("[DAEMON] %s.%s deviation: %.2f%% (current=%.2f, baseline=%.2f)",
+				cfg.watchMetric, cfg.watchField, deviation, currentAvg, baselineAvg)
+		}
+
+		if deviation < cfg.threshold {
+			log.Printf("[DAEMON] Deviation (%.1f%%) is below threshold (%.1f%%). Skipping LLM analysis.",
+				deviation, cfg.threshold)
+			return
+		}
+		log.Printf("[DAEMON] Deviation (%.1f%%) exceeds threshold (%.1f%%). Dispatching LLM analysis...",
+			deviation, cfg.threshold)
+	}
+
+	// ---- LLM analysis ----
+	ag := agent.NewAgent(cfg.llm, cfg.sb, cfg.tools, watchSystemPrompt)
 
 	prompt := fmt.Sprintf(
-		"Please fetch and analyze the metric trends for 'db_stats' in the database '%s' "+
-			"for the sys_id '%s' over the last '%s'. Are there any anomalies?",
-		dbName, sysID, interval,
+		"Please fetch and analyze the metric trends for '%s' focusing on the '%s' field "+
+			"in the database '%s' for the sys_id '%s' over the last '%s'. Are there any anomalies?",
+		cfg.watchMetric, cfg.watchField, cfg.dbName, cfg.sysID, cfg.interval,
 	)
 
 	answer, err := ag.Run(ctx, prompt)
@@ -160,8 +232,8 @@ func runAnalysis(
 
 	fmt.Printf("\n[DAEMON REPORT @ %s]:\n%s\n\n", ts, answer)
 
-	if webhookURL != "" && !strings.Contains(answer, "STATUS: OK") {
-		if err := sendWebhookAlert(ctx, webhookURL, answer); err != nil {
+	if cfg.webhookURL != "" && !strings.Contains(answer, "STATUS: OK") {
+		if err := sendWebhookAlert(ctx, cfg.webhookURL, answer); err != nil {
 			log.Printf("[DAEMON] webhook alert failed: %v", err)
 		}
 	}
@@ -204,6 +276,9 @@ func init() {
 	watchCmd.Flags().String("sys-id", "", "system identifier of the PostgreSQL cluster to monitor")
 	watchCmd.Flags().String("dbname", "", "name of the monitored database in pgwatch")
 	watchCmd.Flags().String("webhook-url", "", "Slack/PagerDuty webhook URL for anomaly alerts")
+	watchCmd.Flags().Float64("critical-threshold", 50.0, "minimum deviation (%) to trigger LLM analysis")
+	watchCmd.Flags().String("watch-metric", "db_stats", "pgwatch metric table for the pre-LLM threshold gate")
+	watchCmd.Flags().String("watch-field", "xact_commit", "JSONB field in the metric table to check for deviations")
 	_ = viper.BindPFlag("PGCOPILOT_WEBHOOK_URL", watchCmd.Flags().Lookup("webhook-url"))
 
 	rootCmd.AddCommand(watchCmd)

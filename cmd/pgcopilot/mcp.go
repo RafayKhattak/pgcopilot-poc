@@ -54,8 +54,9 @@ boundary that protects the ask and watch commands.`,
 
 		tools := []tool.Tool{
 			metrics.NewTrendsTool(metricsClient),
-			metrics.NewHypoPGTool(metricsClient),
+			metrics.NewHypoPGTool(configClient),
 			diagnostics.NewActiveQueriesTool(configClient),
+			diagnostics.NewActiveLocksTool(configClient),
 		}
 
 		s := server.NewMCPServer(

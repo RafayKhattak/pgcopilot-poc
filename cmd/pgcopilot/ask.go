@@ -70,9 +70,10 @@ PostgreSQL state.`,
 
 		sb := sandbox.New(sandbox.ModeReadOnly)
 		trendsTool := metrics.NewTrendsTool(metricsClient)
-		hypopgTool := metrics.NewHypoPGTool(metricsClient)
+		hypopgTool := metrics.NewHypoPGTool(configClient)
 		activeQTool := diagnostics.NewActiveQueriesTool(configClient)
-		ag := agent.NewAgent(llm, sb, []tool.Tool{trendsTool, hypopgTool, activeQTool}, systemPrompt)
+		locksTool := diagnostics.NewActiveLocksTool(configClient)
+		ag := agent.NewAgent(llm, sb, []tool.Tool{trendsTool, hypopgTool, activeQTool, locksTool}, systemPrompt)
 
 		fmt.Println("Thinking...")
 		answer, err := ag.Run(cmd.Context(), prompt)

@@ -14,27 +14,35 @@ import (
 	"github.com/RafayKhattak/pgcopilot/internal/tool"
 )
 
-// hypopgTool creates a hypothetical index via HypoPG and compares the
-// EXPLAIN cost of a query before and after, without mutating any real state.
+// hypopgTool creates a hypothetical index via HypoPG on a live monitored
+// database and compares the EXPLAIN cost of a query before and after, without
+// mutating any real state. It uses Dual-DB Routing: the configClient resolves
+// the target database's connection string from pgwatch.source.
 type hypopgTool struct {
-	client *db.Client
+	configClient *db.Client
 }
 
-// NewHypoPGTool constructs an evaluate_hypothetical_index tool backed by the
-// given database client.
-func NewHypoPGTool(client *db.Client) tool.Tool {
-	return &hypopgTool{client: client}
+// NewHypoPGTool constructs an evaluate_hypothetical_index tool. The
+// configClient must point to the pgwatch Config DB so the tool can
+// dynamically resolve the target database's connection string.
+func NewHypoPGTool(configClient *db.Client) tool.Tool {
+	return &hypopgTool{configClient: configClient}
 }
 
 func (h *hypopgTool) Name() string { return "evaluate_hypothetical_index" }
 
 func (h *hypopgTool) Description() string {
-	return "Creates a hypothetical index using HypoPG and runs EXPLAIN on a query to see if the query planner would use the new index. Returns the before and after query costs."
+	return "Creates a hypothetical index using HypoPG on a live monitored database and runs EXPLAIN " +
+		"on a query to see if the query planner would use the new index. Returns the before and after query costs."
 }
 
 var hypopgParamSchema = json.RawMessage(`{
   "type": "object",
   "properties": {
+    "db_name": {
+      "type": "string",
+      "description": "The name of the monitored database as registered in pgwatch (e.g. tenant3_db)."
+    },
     "query": {
       "type": "string",
       "description": "The SQL SELECT query to test (e.g. SELECT * FROM orders WHERE customer_id = 42)."
@@ -44,7 +52,7 @@ var hypopgParamSchema = json.RawMessage(`{
       "description": "The CREATE INDEX statement to evaluate (e.g. CREATE INDEX ON orders (customer_id))."
     }
   },
-  "required": ["query", "index_statement"],
+  "required": ["db_name", "query", "index_statement"],
   "additionalProperties": false
 }`)
 
@@ -53,6 +61,7 @@ func (h *hypopgTool) Parameters() json.RawMessage { return hypopgParamSchema }
 func (h *hypopgTool) Permission() tool.Permission { return tool.PermissionReadOnly }
 
 type hypopgArgs struct {
+	DbName         string `json:"db_name"`
 	Query          string `json:"query"`
 	IndexStatement string `json:"index_statement"`
 }
@@ -62,19 +71,29 @@ func (h *hypopgTool) Execute(ctx context.Context, raw json.RawMessage) (string, 
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return "", fmt.Errorf("evaluate_hypothetical_index: invalid arguments: %w", err)
 	}
-	if args.Query == "" || args.IndexStatement == "" {
-		return "", fmt.Errorf("evaluate_hypothetical_index: both query and index_statement are required")
+	if args.DbName == "" || args.Query == "" || args.IndexStatement == "" {
+		return "", fmt.Errorf("evaluate_hypothetical_index: db_name, query, and index_statement are all required")
 	}
+
+	dsn, err := h.configClient.GetMonitoredDBConnStr(ctx, args.DbName)
+	if err != nil {
+		return fmt.Sprintf("Failed to resolve connection for %q: %v", args.DbName, err), nil
+	}
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		return fmt.Sprintf("Failed to connect to live database %q: %v", args.DbName, err), nil
+	}
+	defer pool.Close()
 
 	// All steps must run on the same connection because HypoPG hypothetical
 	// indexes only exist in the creating backend's memory.
-	conn, err := h.client.Pool().Acquire(ctx)
+	conn, err := pool.Acquire(ctx)
 	if err != nil {
-		return "", fmt.Errorf("evaluate_hypothetical_index: acquiring connection: %w", err)
+		return fmt.Sprintf("Failed to acquire connection on %q: %v", args.DbName, err), nil
 	}
 	defer conn.Release()
 
-	// 1. EXPLAIN before — baseline cost.
 	costBefore, err := explainCost(ctx, conn, args.Query)
 	if err != nil {
 		return fmt.Sprintf(
@@ -82,7 +101,6 @@ func (h *hypopgTool) Execute(ctx context.Context, raw json.RawMessage) (string, 
 		), nil
 	}
 
-	// 2. Create the hypothetical index.
 	_, err = conn.Exec(ctx, "SELECT * FROM hypopg_create_index($1)", args.IndexStatement)
 	if err != nil {
 		return fmt.Sprintf(
@@ -90,20 +108,16 @@ func (h *hypopgTool) Execute(ctx context.Context, raw json.RawMessage) (string, 
 		), nil
 	}
 
-	// 3. EXPLAIN after — with the hypothetical index visible to the planner.
 	costAfter, err := explainCost(ctx, conn, args.Query)
 	if err != nil {
-		// Best-effort cleanup before returning.
 		_, _ = conn.Exec(ctx, "SELECT * FROM hypopg_reset()")
 		return fmt.Sprintf(
 			"Failed to run EXPLAIN after creating the hypothetical index: %v", err,
 		), nil
 	}
 
-	// 4. Clean up — remove all hypothetical indexes from this session.
 	_, _ = conn.Exec(ctx, "SELECT * FROM hypopg_reset()")
 
-	// 5. Compute improvement.
 	var pctImprovement float64
 	if costBefore != 0 {
 		pctImprovement = ((costBefore - costAfter) / costBefore) * 100
@@ -117,9 +131,9 @@ func (h *hypopgTool) Execute(ctx context.Context, raw json.RawMessage) (string, 
 	}
 
 	return fmt.Sprintf(
-		"Hypothetical index evaluated. Cost before: %.2f. Cost after: %.2f. "+
+		"Hypothetical index evaluated on %s. Cost before: %.2f. Cost after: %.2f. "+
 			"Improvement: %.2f%% (%s). Index statement: %s",
-		costBefore, costAfter,
+		args.DbName, costBefore, costAfter,
 		math.Abs(pctImprovement), verdict,
 		args.IndexStatement,
 	), nil
