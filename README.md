@@ -318,11 +318,23 @@ A Go script (`cmd/setup_env/main.go`) programmatically provisioned the test envi
 
 The script is fully idempotent — uses `CREATE DATABASE` with `42P04` error handling and `ON CONFLICT (name) DO NOTHING` for source registration.
 
-![Go Setup Script Output](./assets/setup-script-output.png)
+<div align="center">
+
+# Go Setup Script Output
+
+<img src="https://github.com/user-attachments/assets/e89534f2-376e-4593-aba9-fbb356dc9859" alt="setup-script-output" width="763" height="494" />
+
+</div>
 
 All 5 databases created, extensions enabled, and sources registered in pgwatch — confirmed in the Web UI:
 
-![pgwatch Web UI Tenants](./assets/web-ui-tenants.png)
+<div align="center">
+
+# pgwatch Web UI Tenants
+
+<img width="1906" height="635" alt="web-ui-tenants" src="https://github.com/user-attachments/assets/dbd97caa-4386-46bf-87b1-a4c64b535400" />
+
+</div>
 
 ### Load Generation
 
@@ -336,7 +348,14 @@ done
 wait
 ```
 
-![100-Client pgbench Stress Test](./assets/pgbench-stress-test.png)
+<div align="center">
+
+# 100-Client pgbench Stress Test
+
+<img width="707" height="257" alt="pgbench-stress-test" src="https://github.com/user-attachments/assets/42165839-9b2e-40d0-892e-65d9e8a8d8ee" />
+
+</div>
+
 
 | Metric | Result |
 |--------|--------|
@@ -370,13 +389,31 @@ Cost before: 2950.00. Cost after: 17.24. Improvement: 99.42% (improvement).
 Index statement: CREATE INDEX ON pgbench_accounts(abalance)
 ```
 
-![Ask Mode - TPS Spike Diagnosis](./assets/ask-tps-spike-rca.png)
+<div align="center">
 
-![Ask Mode - HypoPG Evaluation](./assets/ask-hypopg-evaluation.png)
+# Ask Mode - TPS Spike Diagnosis
+
+<img width="725" height="254" alt="ask-tps-spike-rca" src="https://github.com/user-attachments/assets/df76a5ae-d83e-4b37-8c84-fa3736a15271" />
+
+</div>
+
+<div align="center">
+
+# Ask Mode - HypoPG Evaluation
+
+<img width="801" height="333" alt="ask-hypopg-evaluation" src="https://github.com/user-attachments/assets/8e1ca0cb-a79a-440b-913e-71cec73e6a3f" />
+
+</div>
 
 We also tested the `get_active_locks` tool by artificially creating lock contention — one transaction held an exclusive row lock while another blocked waiting for it. The LLM autonomously selected `get_active_locks` (not `get_active_queries`) and correctly identified the blocking PIDs and the contending `UPDATE` statements:
 
-![Ask Mode - Active Locks Diagnosis](./assets/ask-active-locks.png)
+<div align="center">
+
+# Ask Mode - Active Locks Diagnosis
+
+<img width="635" height="444" alt="ask-active-locks" src="https://github.com/user-attachments/assets/3f110d87-0971-4287-a603-bf4e82808323" />
+
+</div>
 
 ### Proactive Daemon with Webhook Alerting
 
@@ -392,17 +429,35 @@ Webhook alerts enabled → https://webhook.site/...
 [DAEMON] webhook alert dispatched (HTTP 200)
 ```
 
-![Watch Mode Daemon Output](./assets/watch-daemon-alert.png)
+<div align="center">
+
+# Watch Mode Daemon Output
+
+<img width="736" height="660" alt="watch-daemon-alert" src="https://github.com/user-attachments/assets/f6f7dc54-2461-4083-969f-54c83c404aed" />
+
+</div>
 
 The webhook payload was received and verified on webhook.site:
 
-![Webhook Site JSON Payload](./assets/webhook-site-payload.png)
+<div align="center">
+
+# Webhook Site JSON Payload
+
+<img width="1911" height="947" alt="webhook-site-payload" src="https://github.com/user-attachments/assets/b10b71cc-fc36-41aa-84fe-b19c4cce259c" />
+
+</div>
 
 ### MCP Integration
 
 The `mcp` command exposes all 4 tools over `stdio` for external AI clients. Verified with the MCP Inspector:
 
-![MCP Inspector Web UI](./assets/mcp-inspector-ui.png)
+<div align="center">
+
+# MCP Inspector Web UI
+
+<img width="1877" height="885" alt="mcp-inspector-ui" src="https://github.com/user-attachments/assets/d76fac31-db6e-4403-b615-0abf0f1fb0e8" />
+
+</div>
 
 ---
 
