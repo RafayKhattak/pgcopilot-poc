@@ -15,9 +15,10 @@ var rootCmd = &cobra.Command{
 	Long: `pgcopilot is a CLI tool that uses LLMs to monitor, diagnose,
 and recommend optimizations for PostgreSQL databases.
 
-It operates in two modes:
+It operates in three modes:
   • ask   – reactive single-shot analysis of a user prompt
-  • watch – proactive continuous monitoring at a configurable interval`,
+  • watch – proactive continuous monitoring at a configurable interval
+  • mcp   – Model Context Protocol server over stdio for IDE integration`,
 }
 
 // Execute runs the root command and exits on error.

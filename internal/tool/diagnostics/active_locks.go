@@ -54,13 +54,13 @@ type activeLocksArgs struct {
 }
 
 const activeLocksSQL = `
-	SELECT a.pid  AS blocking_pid,
-	       a.query AS blocking_statement,
-	       l.pid  AS blocked_pid
-	FROM   pg_locks l
-	JOIN   pg_stat_activity a ON l.pid = a.pid
-	WHERE  l.granted = false
-	  AND  l.pid != pg_backend_pid()
+	SELECT blocked.pid   AS blocked_pid,
+	       blocker.pid   AS blocking_pid,
+	       blocker.query AS blocking_statement
+	FROM   pg_stat_activity blocked
+	CROSS JOIN LATERAL unnest(pg_blocking_pids(blocked.pid)) AS b(pid)
+	JOIN   pg_stat_activity blocker ON blocker.pid = b.pid
+	WHERE  blocked.wait_event_type = 'Lock'
 	LIMIT  5`
 
 func (t *activeLocksTool) Execute(ctx context.Context, raw json.RawMessage) (string, error) {
@@ -95,11 +95,11 @@ func (t *activeLocksTool) Execute(ctx context.Context, raw json.RawMessage) (str
 	count := 0
 	for rows.Next() {
 		var (
+			blockedPID  int
 			blockingPID int
 			statement   string
-			blockedPID  int
 		)
-		if err := rows.Scan(&blockingPID, &statement, &blockedPID); err != nil {
+		if err := rows.Scan(&blockedPID, &blockingPID, &statement); err != nil {
 			return fmt.Sprintf("Failed to read lock row from %q: %v", args.DbName, err), nil
 		}
 		count++
